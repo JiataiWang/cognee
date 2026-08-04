@@ -472,26 +472,39 @@ async def test_get_neighborhood_edge_filter_handles_cycles(adapter):
 
 # ---------------------------------------------------------------------------
 # get_predecessors / get_successors
-# Known adapter bug: RETURN properties(m) fails with current Kuzu version.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="KuzuAdapter bug: RETURN properties(m) not supported in current Kuzu")
 async def test_predecessors_and_successors(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
     edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
+    await adapter.add_edges(
+        [
+            ("Bob", "Mark", "works_with", {}),
+            ("Mark", "Mary", "works_with", {}),
+        ]
+    )
 
     # Alice->Mark (knows), so Mark's predecessors with "knows" should include Alice
     predecessors = await adapter.get_predecessors("Mark", edge_label="knows")
-    assert len(predecessors) > 0
+    assert {node["id"] for node in predecessors} == {"Alice"}
+    assert predecessors[0]["description"] == "Person mentioned in the text"
 
-    # Mark->Bob (had_dinner_with), so Mark's successors should include Bob
+    # Mark has had_dinner_with edges to Bob and Alice.
     successors = await adapter.get_successors("Mark", edge_label="had_dinner_with")
-    assert len(successors) > 0
+    assert {node["id"] for node in successors} == {"Alice", "Bob"}
+
+    # Omitting the label should also include the competing edge type.
+    assert {node["id"] for node in await adapter.get_predecessors("Mark")} == {"Alice", "Bob"}
+    assert {node["id"] for node in await adapter.get_successors("Mark")} == {
+        "Alice",
+        "Bob",
+        "Mary",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -516,26 +529,27 @@ async def test_get_graph_metrics(adapter):
 
 # ---------------------------------------------------------------------------
 # get_disconnected_nodes
-# Known adapter bug: NOT EXISTS((n)-[]-()) syntax not supported in current Kuzu.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="KuzuAdapter bug: NOT EXISTS pattern syntax unsupported")
 async def test_get_disconnected_nodes(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
     # Before adding edges, all nodes should be disconnected
     disconnected = await adapter.get_disconnected_nodes()
-    assert len(disconnected) == len(kg.nodes)
+    assert set(disconnected) == {node.id for node in kg.nodes}
 
-    # After adding edges, connected nodes should disappear from the list
+    # A single undirected connection should remove only its two endpoints.
     edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
-    await adapter.add_edges(edge_rows)
+    await adapter.add_edges(edge_rows[:1])
+    assert set(await adapter.get_disconnected_nodes()) == {"Bob", "Mary"}
 
+    # Once every node is connected, none should remain in the result.
+    await adapter.add_edges(edge_rows[1:])
     disconnected_after = await adapter.get_disconnected_nodes()
-    assert len(disconnected_after) < len(disconnected)
+    assert disconnected_after == []
 
 
 # ---------------------------------------------------------------------------

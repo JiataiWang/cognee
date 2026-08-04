@@ -39,6 +39,18 @@ from cognee.modules.observability import (
 
 logger = get_logger("remember")
 
+# ``RememberResult`` keeps a task reference so SDK callers can await it, but the
+# HTTP router serializes and then drops the result. Anchor running tasks at module
+# scope as well so the task/result reference cycle cannot be collected mid-run.
+_BACKGROUND_REMEMBER_TASKS: set[asyncio.Task] = set()
+
+
+def _schedule_background_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BACKGROUND_REMEMBER_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_REMEMBER_TASKS.discard)
+    return task
+
 
 class RememberKwargs(TypedDict, total=False):
     """Power-user overrides for remember(). Most users never need these."""
@@ -1209,7 +1221,7 @@ async def _remember_inner(
                 except Exception as exc:
                     logger.warning("remember: session improve failed (non-fatal): %s", exc)
 
-            result._task = asyncio.create_task(_session_improve())
+            result._task = _schedule_background_task(_session_improve())
 
         return result
 
@@ -1267,7 +1279,7 @@ async def _remember_inner(
                 result._fail(exc)
                 logger.exception("Background remember failed")
 
-        result._task = asyncio.create_task(_remember_background())
+        result._task = _schedule_background_task(_remember_background())
         return result
 
     # Blocking mode
